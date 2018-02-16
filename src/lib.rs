@@ -1,159 +1,155 @@
+extern crate failure;
 extern crate pom;
 
-use pom::char_class::{alpha, hex_digit, oct_digit, multispace};
-use pom::Parser;
-use pom::parser::*;
-use pom::DataInput;
-use std::collections::HashMap;
+#[macro_use] extern crate failure_derive;
 
-use std::str::FromStr;
+use error::Result;
+use std::collections::HashMap;
+use std::cmp::min;
+
+mod error;
+mod lexer;
+mod parser;
+
+pub use parser::parse_cmap;
+pub use error::CMapError;
 
 #[derive(Debug)]
-pub enum Value {
-    LiteralString(Vec<u8>),
-    Name(Vec<u8>),
-    Number(String),
-    Integer(i64),
-    Array(Vec<Value>),
-    Operator(String),
-    Boolean(bool),
-    Dictionary(HashMap<String, Value>),
+pub enum WritingMode {
+    Horizontally,
+    Vertically
 }
 
-fn hex_char() -> Parser<u8, u8> {
-    let number = is_a(hex_digit).repeat(2);
-    number.collect().convert(|v|u8::from_str_radix(&String::from_utf8(v).unwrap(), 16))
+impl From<bool> for WritingMode {
+    fn from(u: bool) -> WritingMode {
+        if u { WritingMode::Vertically }
+        else { WritingMode::Horizontally }
+    }
 }
 
-fn comment() -> Parser<u8, ()> {
-    sym(b'%') * none_of(b"\r\n").repeat(0..) * eol().discard()
+impl Default for WritingMode {
+    fn default() ->  WritingMode { WritingMode::Horizontally }
 }
 
-fn content_space() -> Parser<u8, ()> {
-    is_a(multispace).repeat(0..).discard()
+#[derive(Clone, Debug)]
+pub struct CodespaceRange {
+    from: u32,
+    to: u32,
+    len: usize
 }
 
-fn operator() -> Parser<u8, String> {
-    (is_a(alpha) | one_of(b"*'\"")).repeat(1..).convert(|v|String::from_utf8(v))
+impl CodespaceRange {
+    pub fn in_range(&self, bytes: &[u8]) -> bool {
+        if bytes.len() != self.len { return false; }
+        let b = as_code(bytes);
+        self.from <= b && b <= self.to
+    }
 }
 
-fn oct_char() -> Parser<u8, u8> {
-    let number = is_a(oct_digit).repeat(1..4);
-    number.collect().convert(|v|u8::from_str_radix(&String::from_utf8(v).unwrap(), 8))
+#[derive(Clone, Debug)]
+pub struct CMapRange {
+    from: u32,
+    to: u32,
+    start: u32
 }
 
-fn escape_sequence() -> Parser<u8, Vec<u8>> {
-    sym(b'\\') *
-        ( sym(b'\\').map(|_| vec![b'\\'])
-            | sym(b'(').map(|_| vec![b'('])
-            | sym(b')').map(|_| vec![b')'])
-            | sym(b'n').map(|_| vec![b'\n'])
-            | sym(b'r').map(|_| vec![b'\r'])
-            | sym(b't').map(|_| vec![b'\t'])
-            | sym(b'b').map(|_| vec![b'\x08'])
-            | sym(b'f').map(|_| vec![b'\x0C'])
-            | oct_char().map(|c| vec![c])
-            | eol()     .map(|_| vec![])
-            | empty()   .map(|_| vec![])
-        )
+impl CMapRange {
+    pub fn mapped_value(&self, codepoint: u32) -> Option<u32> {
+        if self.from <= codepoint && codepoint <= self.to {
+            Some(self.start + (codepoint - self.from))
+        } else {
+            None
+        }
+    }
 }
 
-fn nested_literal_string() -> Parser<u8, Vec<u8>> {
-    sym(b'(') *
-        ( none_of(b"\\()").repeat(1..)
-            | escape_sequence()
-            | call(nested_literal_string)
-        ).repeat(0..).map(|segments| {
-            let mut bytes = segments.into_iter().fold(
-                vec![b'('],
-                |mut bytes, mut segment| {
-                    bytes.append(&mut segment);
-                    bytes
-                });
-            bytes.push(b')');
-            bytes
-        })
-        - sym(b')')
+#[derive(Default, Debug)]
+pub struct CMap {
+    pub name: String,
+    pub version: String,
+    pub cmap_type: i64,
+    pub writing_mode: WritingMode,
+    pub registry: String,
+    pub ordering: String,
+    pub supplement: u32,
+    codespace_ranges: Vec<CodespaceRange>,
+    unicode_mapping: HashMap<u32, String>,
+    unicode_range_mapping: Vec<CMapRange>,
+    cid_mapping: HashMap<u32, u32>,
+    cid_range_mapping: Vec<CMapRange>
 }
 
-fn literal_string() -> Parser<u8, Vec<u8>> {
-    sym(b'(') *
-        ( none_of(b"\\()").repeat(1..)
-            | escape_sequence()
-            | nested_literal_string()
-        ).repeat(0..).map(|segments|segments.concat())
-        - sym(b')')
-}
+impl CMap {
+    pub fn extract_codepoint(&self, codepoints: &[u8]) -> Option<usize> {
+        let max_len = self.max_len_codespace();
+        for i in 0..min(max_len+1, codepoints.len()) {
+            let substr = &codepoints[0..(i+1)];
+            for range in &self.codespace_ranges {
+                if range.in_range(substr) {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
 
-fn name() -> Parser<u8, Vec<u8>> {
-    sym(b'/') * (none_of(b" \t\n\r\x0C()<>[]{}/%#") | sym(b'#') * hex_char()).repeat(0..)
-}
+    pub fn codepoint_to_cid(&self, codepoint: u32) -> u32 {
+        if let Some(cid) = self.cid_mapping.get(&codepoint) {
+            return *cid;
+        }
+        for range in &self.cid_range_mapping {
+            if let Some(cid) = range.mapped_value(codepoint) {
+                return cid;
+            }
+        }
+        0 // If no mapping is found we have to return 0
+    }
 
-fn integer() -> Parser<u8, i64> {
-    let number = one_of(b"+-").opt() + one_of(b"0123456789").repeat(1..);
-    number.collect().convert(|v|String::from_utf8(v)).convert(|s|i64::from_str(&s))
-}
+    pub fn codepoint_to_unicode(&self, codepoint: u32) -> Result<String> {
+        if let Some(unicode) = self.unicode_mapping.get(&codepoint) {
+            return Ok(unicode.to_owned());
+        }
+        for range in &self.unicode_range_mapping {
+            if let Some(unicode) = range.mapped_value(codepoint) {
+                return as_string(&from_code(unicode));
+            }
+        }
+        Err(CMapError::NoUnicodeMappingFound(codepoint))
+    }
 
-fn number() -> Parser<u8, String> {
-    let number = one_of(b"+-").opt() +
-        ( (one_of(b"0123456789") - one_of(b"0123456789").repeat(0..).discard())
-            | (one_of(b"0123456789").repeat(1..) * sym(b'.') - one_of(b"0123456789").repeat(0..))
-            | sym(b'.') - one_of(b"0123456789").repeat(1..)
-        );
-    number.collect().convert(|v|String::from_utf8(v))
-}
+    pub fn add_codespace_range(&mut self, range: CodespaceRange) {
+        self.codespace_ranges.push(range);
+    }
 
-fn space() -> Parser<u8, ()> {
-    ( one_of(b" \t\n\r\0\x0C").repeat(1..).discard()
-    ).repeat(0..).discard()
-}
+    pub fn add_unicode_mapping(&mut self, codepoints: &[u8], unicode: String) {
+        self.unicode_mapping.insert(as_code(codepoints), unicode);
+    }
 
-// Dictionaries are not mentioned in the CMap spec but are produced by software like Cairo and Skia and supported other by readers
-fn dictionary() -> Parser<u8, HashMap<String, Value>> {
-    let entry = name() - space() + call(value);
-    let entries = seq(b"<<") * space() * entry.repeat(0..) - seq(b">>");
-    entries.map(|entries| entries.into_iter().fold(
-        HashMap::new(),
-        |mut dict: HashMap<String, Value>, (key, value)| { dict.insert(String::from_utf8(key).unwrap(), value); dict }
-    ))
-}
+    fn add_unicode_range(&mut self, range: CMapRange) {
+        self.unicode_range_mapping.push(range);
+    }
 
-fn hexadecimal_string() -> Parser<u8, Vec<u8>> {
-    sym(b'<') * hex_char().repeat(0..) - sym(b'>')
-}
+    pub fn add_cid_mapping(&mut self, codepoints: &[u8], cid: u32) {
+        self.cid_mapping.insert(as_code(codepoints), cid);
+    }
 
-fn eol() -> Parser<u8, u8> {
-    sym(b'\r') * sym(b'\n') | sym(b'\n') | sym(b'\r')
-}
-
-fn value() -> Parser<u8, Value> {
-    ( seq(b"true").map(|_| Value::Boolean(true))
-    | seq(b"false").map(|_| Value::Boolean(false))
-    | integer().map(|v| Value::Integer(v))
-    | number().map(|v| Value::Number(v))
-    | name().map(|v| Value::Name(v))
-    | operator().map(|v| Value::Operator(v))
-    | literal_string().map(|v| Value::LiteralString(v))
-    | dictionary().map(|v| Value::Dictionary(v))
-    | hexadecimal_string().map(|v| Value::LiteralString(v))
-    | array().map(|v| Value::Array(v))
-    ) - content_space()
-}
+    fn add_cid_range(&mut self, range: CMapRange) {
+        self.cid_range_mapping.push(range);
+    }
 
 
+    pub fn merge(&mut self, other: &CMap) {
+        self.codespace_ranges.extend_from_slice(&other.codespace_ranges);
+        self.unicode_mapping.extend(other.unicode_mapping.iter().map(|(k,v)| (k.clone(), v.clone())));
+        self.cid_mapping.extend(other.cid_mapping.iter());
+        self.cid_range_mapping.extend_from_slice(&other.cid_range_mapping);
+    }
 
-fn array() -> Parser<u8, Vec<Value>> {
-    sym(b'[') * space() * call(value).repeat(0..) - sym(b']')
-}
+    fn max_len_codespace(&self) -> usize {
+        let max_len = self.codespace_ranges.iter().max_by_key(|r| r.len);
+        max_len.map(|r| r.len).unwrap_or(1)
+    }
 
-
-fn file() -> Parser<u8,Vec<Value>>
-{
-    ( comment().repeat(0..) * content_space() * value()).repeat(1..)
-}
-
-pub fn parse(input: &[u8]) -> Result<Vec<Value>, pom::Error> {
-    file().parse(&mut DataInput::new(input))
 }
 
 fn as_code(str: &[u8]) -> u32 {
@@ -164,79 +160,56 @@ fn as_code(str: &[u8]) -> u32 {
     code
 }
 
-pub fn get_unicode_map(input: &[u8]) -> Result<HashMap<u32, u32>, &'static str> {
-    let lexed = parse(&input).expect("failed to parse");
+fn from_code(code: u32) -> [u8; 4]{
+    let mut str = [0u8; 4];
+    for (i, byte) in str.iter_mut().enumerate() {
+        *byte = ((code >> (i*8)) & 0xFF) as u8;
+    }
+    str
+}
 
-    let mut i = 0;
-    let mut map = HashMap::new();
-    while i < lexed.len() {
-        match lexed[i] {
-            Value::Operator(ref o) => {
-                match o.as_ref() {
-                    "beginbfchar" => {
-                        let count = if let &Value::Integer(ref c) = &lexed[i-1] { Ok(*c) } else { Err("beginbfchar exected int") }?;
-                        i += 1;
-                        for _ in 0..count {
-                            let char_code = if let &Value::LiteralString(ref s) = &lexed[i] { Ok(s) } else { Err("beginbfchar exected hexstring") }?;
-                            let uni_code = if let &Value::LiteralString(ref s) = &lexed[i+1] { Ok(s) } else { Err("beginbfchar exected hexstring") }?;
-                            //let char_code =
-                            map.insert(as_code(char_code), as_code(uni_code));
-                            i += 2;
-                        }
-                        i += 1;
-                    }
-                    "beginbfrange" => {
-                        let count = if let &Value::Integer(ref c) = &lexed[i-1] { Ok(*c) } else { Err("beginbfrange exected int") }?;
-                        i += 1;
-                        for _ in 0..count {
-                            let lower_code = if let &Value::LiteralString(ref s) = &lexed[i] { Ok(as_code(s)) } else { Err("beginbfrange exected hexstring") }?;
-                            let upper_code = if let &Value::LiteralString(ref s) = &lexed[i+1] { Ok(as_code(s)) } else { Err("beginbfrange exected hexstring") }?;
-                            match &lexed[i+2] {
-                                &Value::LiteralString(ref start) => {
-                                    let mut unicode = as_code(start);
-                                    // inclusive ranges would be nice
-                                    for c in lower_code..upper_code+1 {
-                                        map.insert(c, unicode);
-                                        unicode += 1;
-                                    }
-                                }
-                                &Value::Array(ref codes) => {
-                                    // inclusive ranges would be nice
-                                    let mut i = 0;
-                                    if (upper_code - lower_code + 1) as usize != codes.len() {
-                                        return Err("bad length of array");
-                                    }
-                                    for c in lower_code..upper_code+1 {
-                                        map.insert(c, if let &Value::LiteralString(ref s) = &codes[i] { Ok(as_code(s)) } else { Err("beginbfrange exected hexstring") }?);
-                                        i += 1;
-                                    }
-                                }
-                                _ => { return Err("beginbfrange exected array or literal") }
-                            }
-                            i += 3;
-                        }
-                        i += 1;
-                    }
-                    _ => { i += 1; }
+fn as_string(str: &[u8]) -> Result<String> {
+    match str.len() {
+        0 => Ok(String::new()),
+        1 => {
+          // Luckily ISO 8859 maps 1:1 to unicode points
+            Ok((str[0] as char).to_string())
+        },
+        _ => {
+            let utf16: Result<Vec<String>> = str.chunks(2).map(|x| {
+                if x.len() == 2 {
+                    let code = x[0] as u16 | (x[1] as u16) << 8;
+                    String::from_utf16(&[code]).map_err(CMapError::Utf16)
+                } else {
+                    Ok((x[0] as char).to_string())
                 }
-
-            }
-            _ => { i += 1; }
+            }).collect();
+            utf16.map(|v| v.concat())
         }
     }
-    Ok(map)
+}
 
+fn increment_code(str: &mut [u8]) {
+    let mut carry_bit = 1;
+    for x in str.iter_mut().rev() {
+        if carry_bit > 0 && *x == 255 {
+            *x = 0;
+        }
+        else if carry_bit > 0 {
+            *x += 1;
+            carry_bit = 0;
+        }
+    }
 }
 
 
 #[cfg(test)]
 mod tests {
-    use parse;
     use std::fs::File;
     use std::io::BufReader;
     use std::io::Read;
-
-    fn do_parse(input: &[u8]) {
+    use super::*;
+    /*fn do_parse(input: &[u8]) {
         let result = parse(input);
         if let Ok(lines) = result  {
             for l in lines {
@@ -245,16 +218,14 @@ mod tests {
         } else {
             println!("{:?}", result)
         }
-    }
+    }*/
     #[test]
     fn it_works() {
-        let f = File::open("example").unwrap();
-        let mut f = BufReader::new(f);
+        let mut f = File::open("assets/example").unwrap();
         let mut contents = Vec::new();
-        f.read_to_end(&mut contents);
+        f.read_to_end(&mut contents).unwrap();
 
-        //for line in f.lines() {
-        do_parse(&contents);
-
+        let cmap = parse_cmap(&contents).unwrap();
+        println!("{:?}", cmap);
     }
 }

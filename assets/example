@@ -1,0 +1,103 @@
+%!PS-Adobe-3.0 Resource-CMap
+%%DocumentNeededResources: procset CIDInit
+%%IncludeResource: procset CIDInit
+%%BeginResource: CMap 83pv-RKSJ-H
+%%Title: (83pv-RKSJ-H Adobe Japan1 0)
+%%Version: 1
+
+/CIDInit /ProcSet findresource begin
+
+12 dict begin
+
+begincmap
+
+/CIDSystemInfo 3 dict dup begin
+  /Registry (Adobe) def
+  /Ordering (Japan1) def
+  /Supplement 0 def 
+end def
+
+/CMapName /83pv-RKSJ-H def
+
+/CMapVersion 1 def
+/CMapType 0 def
+
+/UIDOffset 0 def
+
+/XUID [1 10 25324] def
+/WMode 0 def
+
+4 begincodespacerange
+  <00>   <80>
+  <8140> <9ffc>
+  <a0>   <df>
+  <e040> <fbfc>
+endcodespacerange
+
+1 beginnotdefrange
+<00> <1f> 1
+endnotdefrange
+
+10 begincidrange
+<20> <7e>        1
+<8140> <817e>  633
+<8180> <81ac>  696
+<81b8> <81bf>  741
+<81c8> <81ce>  749
+<9540> <957e> 3475
+<9580> <95fc> 3538
+<9640> <967e> 3663
+<9680> <96fc> 3726
+<9740> <977e> 3851
+endcidrange
+
+9 begincidrange
+<9780> <97fc> 3914
+<9840> <9872> 4039
+<989f> <98fc> 4090
+<9940> <997e> 4184
+<9980> <99fc> 4247
+<ed83> <ed83> 7934
+<ed84> <ed84>  992
+<ed85> <ed85> 7935
+<ed86> <ed86>  994
+<ed87> <ed87> 7936
+endcidrange
+
+4 begincidrange
+<ed88> <ed8d>  996
+<ed8e> <ed8e> 7937
+<ee9a> <ee9a>  768
+<ee9b> <ee9c> 7631
+endcidrange
+
+5 begincidchar
+<8143> 8286
+<8144> 8274
+<814a> 8272
+<8387> 7936
+<838e> 7937
+endcidchar
+
+5 beginbfchar
+<27> /quotesingle
+<5c> /yen
+<60> /grave
+<7e> /tilde
+<7f> <7f>
+endbfchar
+
+2 beginbfrange
+<00> <26> <00>
+<61> <7d> <61>
+endbfrange
+
+endcmap
+
+CMapName currentdict /CMap defineresource pop
+
+end
+end
+%%EndResource
+%%EOF
+

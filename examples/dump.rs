@@ -6,7 +6,7 @@ use std::path::Path;
 
 
 fn main() {
-
+/*
     let f = File::open("example.cmap").unwrap();
     let mut f = BufReader::new(f);
     let mut contents = Vec::new();
@@ -16,5 +16,5 @@ fn main() {
     println!("{:?}", lexed);
 
     println!("map {:?}", get_unicode_map(&contents));
-
+*/
 }

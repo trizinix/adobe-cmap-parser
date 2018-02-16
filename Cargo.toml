@@ -10,3 +10,5 @@ repository = "https://github.com/jrmuizel/adobe-cmap-parser"
 
 [dependencies]
 pom = "1.0.1"
+failure = "0.1.1"
+failure_derive = "0.1.1"
